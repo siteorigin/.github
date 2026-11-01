@@ -1,0 +1,104 @@
+# The one deploy for SiteOrigin sites. Each site repo calls it from a short
+# .github/workflows/deploy.yml; README.md shows that file and the secrets.
+#
+# It logs in to the server as deploy, checks the server's key against a pinned
+# copy, and runs one script from /home/deploy/bin. That script, and so-deploy
+# behind it, live in siteorigin/siteorigin-servers.
+name: Deploy
+
+on:
+  workflow_call:
+    inputs:
+      live:
+        description: Script that deploys the live site, e.g. deploy-siteorigin-theme.
+        type: string
+        default: ''
+      test:
+        description: Script that deploys the test site, e.g. deploy-siteorigin-test-theme.
+        type: string
+        default: ''
+      live-branches:
+        description: Branches that deploy the live site, separated by spaces.
+        type: string
+        default: master main
+      test-branches:
+        description: Branches that deploy the test site, separated by spaces.
+        type: string
+        default: testing staging
+
+permissions: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # One deploy at a time per repo and branch. A push waits for the running
+    # deploy. A later push may replace a waiting one, which loses nothing:
+    # so-deploy always ships the branch's newest commit.
+    concurrency:
+      group: deploy-${{ github.repository }}-${{ github.ref_name }}
+      cancel-in-progress: false
+    steps:
+      - name: Pick the site for this branch
+        id: site
+        env:
+          BRANCH: ${{ github.ref_name }}
+          LIVE: ${{ inputs.live }}
+          TEST: ${{ inputs.test }}
+          LIVE_BRANCHES: ${{ inputs.live-branches }}
+          TEST_BRANCHES: ${{ inputs.test-branches }}
+        run: |
+          if [ -n "$LIVE" ] && [[ " $LIVE_BRANCHES " == *" $BRANCH "* ]]; then
+            echo "site=live" >> "$GITHUB_OUTPUT"; script="$LIVE"
+          elif [ -n "$TEST" ] && [[ " $TEST_BRANCHES " == *" $BRANCH "* ]]; then
+            echo "site=test" >> "$GITHUB_OUTPUT"; script="$TEST"
+          else
+            echo "::error::Branch $BRANCH deploys no site. Live: $LIVE_BRANCHES. Test: $TEST_BRANCHES."
+            exit 1
+          fi
+          if ! [[ "$script" =~ ^deploy-[a-z0-9-]+$ ]]; then
+            echo "::error::Script name must look like deploy-<name>, got: $script"
+            exit 1
+          fi
+          echo "script=$script" >> "$GITHUB_OUTPUT"
+
+      - name: Run the deploy script on the server
+        # The site is picked in the shell, not with && and || in an expression,
+        # because an empty live secret would fall through to the test value.
+        env:
+          SITE: ${{ steps.site.outputs.site }}
+          SCRIPT: ${{ steps.site.outputs.script }}
+          LIVE_HOST: ${{ secrets.DEPLOY_HOST }}
+          LIVE_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          TEST_HOST: ${{ secrets.TEST_DEPLOY_HOST }}
+          TEST_KNOWN_HOSTS: ${{ secrets.TEST_DEPLOY_KNOWN_HOSTS }}
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          if [ "$SITE" = live ]; then
+            HOST="$LIVE_HOST"; KNOWN_HOSTS="$LIVE_KNOWN_HOSTS"; PREFIX=DEPLOY
+          else
+            HOST="$TEST_HOST"; KNOWN_HOSTS="$TEST_KNOWN_HOSTS"; PREFIX=TEST_DEPLOY
+          fi
+          missing=""
+          [ -n "$HOST" ] || missing="$missing ${PREFIX}_HOST"
+          [ -n "$KNOWN_HOSTS" ] || missing="$missing ${PREFIX}_KNOWN_HOSTS"
+          [ -n "$SSH_KEY" ] || missing="$missing DEPLOY_SSH_KEY"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing secrets:$missing"
+            exit 1
+          fi
+          dir="$RUNNER_TEMP/ssh"
+          mkdir -m 700 "$dir"
+          printf '%s\n' "$SSH_KEY" > "$dir/key"
+          printf '%s\n' "$KNOWN_HOSTS" > "$dir/known_hosts"
+          chmod 600 "$dir/key"
+          # -F and GlobalKnownHostsFile keep the runner's own SSH files out, so
+          # only the pinned key is trusted.
+          ssh -F /dev/null -i "$dir/key" \
+            -o GlobalKnownHostsFile=/dev/null \
+            -o IdentitiesOnly=yes \
+            -o BatchMode=yes \
+            -o ConnectTimeout=30 \
+            -o UserKnownHostsFile="$dir/known_hosts" \
+            -o StrictHostKeyChecking=yes \
+            "deploy@$HOST" "/home/deploy/bin/$SCRIPT"
