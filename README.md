@@ -30,7 +30,7 @@ Each site repo holds the same secret names. The values never appear in this repo
 
 | Secret | What it is |
 |---|---|
-| `DEPLOY_SSH_KEY` | The private `siteorigin-do-deploy` key. |
+| `DEPLOY_SSH_KEY` | The private CI deploy key. It can only run deploy scripts; `siteorigin-servers` replaces it with `scripts/rotate-ci-key.sh`. |
 | `DEPLOY_HOST` | The live site's server address. |
 | `DEPLOY_KNOWN_HOSTS` | The live server's public key, as one `known_hosts` line. |
 | `TEST_DEPLOY_HOST` | The test site's server address. Only with a test site. |
