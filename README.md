@@ -24,6 +24,8 @@ jobs:
 
 `master` or `main` deploys the live site. `testing` or `staging` deploys the test site. A repo that uses other branch names sets `live-branches` or `test-branches`, for example `test-branches: develop`. A repo with no test site leaves out `test`. Either way, `push: branches:` lists every branch that deploys.
 
+After the deploy, the workflow checks that the script reported a commit and that the site answers with a 2xx or 3xx. If either fails, the run fails, and the deployed files stay in place. A new site adds its address to the "Check the deploy" step.
+
 ### Secrets
 
 Each site repo holds the same secret names. The values never appear in this repo.
