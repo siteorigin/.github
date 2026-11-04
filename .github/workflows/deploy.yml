@@ -65,6 +65,8 @@ jobs:
       - name: Run the deploy script on the server
         # The site is picked in the shell, not with && and || in an expression,
         # because an empty live secret would fall through to the test value.
+        # Naming the shell turns on pipefail, so tee keeps ssh's exit code.
+        shell: bash
         env:
           SITE: ${{ steps.site.outputs.site }}
           SCRIPT: ${{ steps.site.outputs.script }}
@@ -101,4 +103,44 @@ jobs:
             -o ConnectTimeout=30 \
             -o UserKnownHostsFile="$dir/known_hosts" \
             -o StrictHostKeyChecking=yes \
-            "deploy@$HOST" "/home/deploy/bin/$SCRIPT"
+            "deploy@$HOST" "/home/deploy/bin/$SCRIPT" | tee "$RUNNER_TEMP/deploy.log"
+
+      - name: Check the deploy
+        # A site that redirects still passes: the redirect comes from WordPress,
+        # so it proves the site runs, and following it would test another site.
+        # The query string skips any cached page.
+        env:
+          SCRIPT: ${{ steps.site.outputs.script }}
+          SHA: ${{ github.sha }}
+        run: |
+          deployed="$(grep -oE '^Deployed [0-9a-f]+' "$RUNNER_TEMP/deploy.log" | tail -1 | cut -d' ' -f2 || true)"
+          if [ -z "$deployed" ]; then
+            echo "::error::The deploy script did not report a commit."
+            exit 1
+          fi
+          # so-deploy ships the branch's newest commit, which a later push can change.
+          if [[ "$SHA" != "$deployed"* ]]; then
+            echo "::warning::Deployed $deployed, a newer commit than this run's $SHA."
+          fi
+          case "$SCRIPT" in
+            deploy-siteorigin-theme|deploy-siteorigin-components|deploy-siteorigin-support) url=https://siteorigin.com/ ;;
+            deploy-siteorigin-docs) url=https://siteorigin.com/docs/ ;;
+            deploy-siteorigin-test-theme|deploy-siteorigin-components-testing|deploy-siteorigin-support-test) url=https://test.siteorigin.com/ ;;
+            deploy-siteorigin-premium-layouts|deploy-layout-viewer) url=https://layouts.siteorigin.com/ ;;
+            deploy-so-premium-demo-grid) url=https://demo.siteorigin.com/premium/ ;;
+            deploy-siteorigin-stock) url=https://stock.siteorigin.com/ ;;
+            deploy-site-packs) url=https://packs.siteorigin.com/ ;;
+            deploy-clipboard) url=https://clipboard.siteorigin.com/ ;;
+            *) echo "::error::No address to check for $SCRIPT. Add it to this step."; exit 1 ;;
+          esac
+          for try in 1 2 3; do
+            code="$(curl -sS -o /dev/null --max-time 30 -w '%{http_code}' "$url?deploy-check=$SHA" || true)"
+            if [[ "$code" =~ ^[23] ]]; then
+              echo "$url answered $code"
+              exit 0
+            fi
+            echo "$url answered $code, try $try of 3"
+            sleep 10
+          done
+          echo "::error::$url answered $code after the deploy."
+          exit 1
